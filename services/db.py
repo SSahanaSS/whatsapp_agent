@@ -1,8 +1,9 @@
 import json
-from config import cur,conn
+from config import cur, conn
+
 
 def get_or_create_customer(phone):
-    clean_phone = phone.replace("whatsapp:", "")
+    clean_phone = phone.replace("whatsapp:", "").lstrip("+")
     cur.execute("SELECT customer_id FROM customers WHERE phone=%s", (clean_phone,))
     result = cur.fetchone()
     if result:
@@ -11,6 +12,7 @@ def get_or_create_customer(phone):
         "INSERT INTO customers (phone) VALUES (%s) RETURNING customer_id",
         (clean_phone,)
     )
+    conn.commit()
     return cur.fetchone()[0]
 
 
@@ -29,6 +31,7 @@ def save_message(customer_id, sender, text):
         INSERT INTO messages (customer_id, sender, message_text)
         VALUES (%s, %s, %s)
     """, (customer_id, sender, text))
+    conn.commit()
 
 
 def get_menu():
@@ -66,6 +69,7 @@ def save_session(customer_id, items):
             INSERT INTO order_sessions (customer_id, items, status)
             VALUES (%s, %s, 'active')
         """, (customer_id, items_json))
+    conn.commit()
 
 
 def finalize_order(customer_id, items):
@@ -96,6 +100,7 @@ def finalize_order(customer_id, items):
         SET status='completed'
         WHERE customer_id=%s AND status='active'
     """, (customer_id,))
+    conn.commit()
     return total
 
 
@@ -119,11 +124,66 @@ def merge_cart(current_order, action, items):
                 cart[name] = qty
     return [{"item_name": k, "qty": v} for k, v in cart.items()]
 
+
 def mark_session_completed(customer_id: int):
     cur.execute("""
         UPDATE order_sessions
         SET status = 'completed'
         WHERE customer_id = %s AND status = 'active'
     """, (customer_id,))
-    conn.commit()  # ✅ don't forget to commit!
+    conn.commit()
     print(f"[DB] Session completed for customer_id={customer_id}")
+
+
+# ── ETA FUNCTIONS ──────────────────────────────────────────────────────────────
+
+def get_prep_time(items):
+    """Base prep time from total quantity of items ordered."""
+    total_qty = sum(item["qty"] for item in items)
+    if total_qty <= 2:
+        return 15
+    elif total_qty <= 5:
+        return 25
+    elif total_qty <= 10:
+        return 35
+    else:
+        return 50
+
+
+def get_kitchen_queue_delay():
+    """Each confirmed+unpaid order in last 2 hours adds 10 mins of queue delay."""
+    cur.execute("""
+        SELECT COUNT(*) FROM orders
+        WHERE order_status = 'confirmed'
+        AND payment_status = 'pending'
+        AND created_at > NOW() - INTERVAL '2 hours'
+    """)
+    pending_count = cur.fetchone()[0]
+    return pending_count * 10
+
+
+def save_eta(customer_id, eta_minutes, address=None):
+    """Save ETA and delivery address to the most recent order."""
+    cur.execute("""
+        UPDATE orders
+        SET eta_minutes = %s,
+            customer_address = %s
+        WHERE customer_id = %s
+        AND created_at = (
+            SELECT MAX(created_at) FROM orders WHERE customer_id = %s
+        )
+    """, (eta_minutes, address, customer_id, customer_id))
+    conn.commit()
+    print(f"[DB] ETA {eta_minutes} mins saved for customer_id={customer_id}")
+
+
+def get_saved_address(customer_id):
+    """Fetch the last used delivery address for returning customers."""
+    cur.execute("""
+        SELECT customer_address FROM orders
+        WHERE customer_id = %s
+        AND customer_address IS NOT NULL
+        ORDER BY created_at DESC LIMIT 1
+    """, (customer_id,))
+    row = cur.fetchone()
+    return row[0] if row else None

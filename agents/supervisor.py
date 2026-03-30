@@ -28,71 +28,68 @@ def supervisor_agent(state: dict) -> dict:
     message = state.get("message", "")
     history = state.get("history", "")
     history_str = history if isinstance(history, str) else str(history)
-
-    # Truncate by lines instead of characters
     history_trimmed = "\n".join(history_str.split("\n")[-10:]) if history_str else "(none)"
+
     prompt = f"""
-You are a STRICT intent classifier for a food delivery WhatsApp assistant.
+You are an intent classifier for a food ordering WhatsApp chatbot.
 
-Your job: classify the user message into EXACTLY ONE of these:
-- order
-- faq
-- complaint
-- greeting
-- unknown
+VERY IMPORTANT: Users may write in ANY language or mix of languages.
+This includes Tamil, Hindi, Tamil+English, Hindi+English, or pure English.
+You MUST understand the meaning — do NOT rely on specific keywords or spelling.
 
-━━━━━━━━━━ RULES (VERY IMPORTANT) ━━━━━━━━━━
+Your job: understand what the user MEANS and classify into ONE of:
+- order      → anything about food, menu, ordering, cart, checkout, payment, delivery address
+- faq        → questions about the business (timings, location, delivery areas, policies)
+- complaint  → issues with a past order
+- greeting   → hi, hello, thanks, bye, acknowledgements like "ok", "okay", "noted"
+- unknown    → truly cannot determine intent even with context
 
-1. ORDER → ONLY if the user is CLEARLY trying to BUY food
-   Examples:
-   - "I want 2 biryanis"
-   - "Give me menu"
-   - "Can I order now"
-   - "1 chicken roll please"
+━━━━━━━━━━ HOW TO CLASSIFY ━━━━━━━━━━
 
-2. FAQ → ANY question about:
-   - delivery, timings, open/close hours
-   - weekends, location, availability
-   - ingredients, menu info (WITHOUT ordering)
-   Examples:
-   - "Do you deliver on weekends?"
-   - "What time do you open?"
-   - "Where are you located?"
+Think about what the user MEANS, not what language they used.
 
-3. COMPLAINT → ONLY if referring to PAST order issues
-   Examples:
-   - "My food was cold"
-   - "Wrong item delivered"
-
-4. GREETING → ONLY pure greetings
-   - "hi", "hello", "hey"
-
-5. UNKNOWN → 
-   - incomplete / unclear / typos
-   - short messages like "ok", "hmm", "can i orde"
-   - anything ambiguous
-
-━━━━━━━━━━ CRITICAL BEHAVIOUR ━━━━━━━━━━
-
-- If message is INCOMPLETE or has TYPO → return "unknown"
-- DO NOT assume intent
-- "can i orde" → unknown (NOT order)
+order examples (any language):
+- "Enna iruku" → asking what's available → order
+- "Sambar la chicken poduveengala" → asking about food → order  
+- "Menu kaattu" → show menu → order
+- "Biryani vennum" → want biryani → order
+- "Kya milega" → what's available → order
+- "Ek biryani do" → give one biryani → order
+- "What's there to eat" → order
 - "menu?" → order
-- "order?" → unknown (not clear enough)
-- "ok", "hmm", "thanks" → use HISTORY context
 
-━━━━━━━━━━ HISTORY ━━━━━━━━━━
+greeting examples:
+- "okay thanks", "ok", "thanks", "seri", "achha", "theek hai" → greeting
+- "hi", "hello", "vanakkam", "namaste" → greeting
+
+faq examples:
+- "Eppo close aaguveenga" → what time do you close → faq
+- "Deliver pannuveenga?" → do you deliver → faq
+- "Kab tak open ho" → when are you open → faq
+
+complaint examples:
+- "Thambi food ku taste illai" → food had no taste → complaint
+- "Wrong item achu" → wrong item came → complaint
+- "Khana sahi nahi tha" → food wasn't right → complaint
+
+unknown — ONLY use this if you genuinely cannot figure out intent even with history:
+- Random characters, gibberish, completely unrelated topics
+
+━━━━━━━━━━ HISTORY CONTEXT ━━━━━━━━━━
+Use history to resolve ambiguous messages.
+If user said "ok" or "seri" after a bot message about an order → greeting
+If user said "ok" after bot asked for address → that's part of order flow → order
+
 {history_trimmed}
 
 ━━━━━━━━━━ MESSAGE ━━━━━━━━━━
 "{message}"
 
 ━━━━━━━━━━ OUTPUT ━━━━━━━━━━
-Reply with ONLY ONE WORD:
-order / faq / complaint / greeting / unknown
+Reply with ONLY ONE WORD: order / faq / complaint / greeting / unknown
 """
 
-    routed_to = "unknown"  # safe default
+    routed_to = "unknown"
 
     try:
         response = groq_client.chat.completions.create(
@@ -103,8 +100,6 @@ order / faq / complaint / greeting / unknown
         )
 
         raw = response.choices[0].message.content.strip().lower()
-
-        # Strip punctuation in case model returns "faq." or "faq\n"
         raw = raw.strip(".,!?\n\r ")
 
         routed_to = raw if raw in _VALID_ROUTES else "unknown"

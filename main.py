@@ -1,6 +1,8 @@
-from fastapi import FastAPI, Request, Form, Header
 import json
-import hmac, hashlib
+import hmac
+import hashlib
+
+from fastapi import FastAPI, Request, Form, Header
 
 from config import TWILIO_WHATSAPP_NUMBER, RAZORPAY_WEBHOOK_SECRET, client
 from graph import build_graph
@@ -12,44 +14,59 @@ from services.db import (
     get_active_session,
     mark_session_completed,
     save_message,
+    save_eta,
+    cur,
+    conn,
 )
+from services.eta import calculate_full_eta
 from services.wa import send_whatsapp
 
 app = FastAPI()
 graph = build_graph()
 
-
 def _build_state(phone: str, message: str) -> dict:
-    """Helper — builds the full AgentState dict for a given phone + message."""
-    customer_id = get_or_create_customer(phone)
-    history = get_history(customer_id)
-    menu = get_menu()
-    session = get_active_session(customer_id)
+    customer_id   = get_or_create_customer(phone)
+    history       = get_history(customer_id)
+    menu          = get_menu()
+    session       = get_active_session(customer_id)
     current_order = session[1] if session else []
 
+    # ── Restore delivery address from DB ──────────────────────────────────────
+    cur.execute("""
+        SELECT customer_address FROM orders
+        WHERE customer_id = %s
+        ORDER BY created_at DESC LIMIT 1
+    """, (customer_id,))
+    row              = cur.fetchone()
+    delivery_address = row[0] if row and row[0] else ""
+
+    # ── Sticky route — stay on order if session is active ─────────────────────
+    sticky = "order" if session else None
+
     return {
-        "customer_id": customer_id,
-        "sender": phone,
-        "message": message,
-        "history": history,
-        "menu": menu,
-        "current_order": current_order,
-        "intent": "",
-        "action": "",
-        "items": [],
-        "reply": "",
-        "summary": "",
-        "total_amount": 0,
-        "payment_status": None,
-        "payment_link_id": None,
-        "stage": "ordering",
-        "route": "",   
-        "sticky_route": None  ,
-        "resolved": False,     # supervisor will fill this
-        "stuck":          False,
-        "stuck_reason":   "",
-        "faq_confidence": None,
-        "faq_searches":   None,
+        "customer_id":      customer_id,
+        "sender":           phone,
+        "message":          message,
+        "history":          history,
+        "menu":             menu,
+        "current_order":    current_order,
+        "delivery_address": delivery_address,   # ✅ restored from DB
+        "intent":           "",
+        "action":           "",
+        "items":            [],
+        "reply":            "",
+        "summary":          "",
+        "total_amount":     0,
+        "payment_status":   None,
+        "payment_link_id":  None,
+        "stage":            "ordering",
+        "route":            "",
+        "sticky_route":     sticky,             # ✅ sticky if session active
+        "resolved":         False,
+        "stuck":            False,
+        "stuck_reason":     "",
+        "faq_confidence":   None,
+        "faq_searches":     None,
     }
 
 
@@ -62,9 +79,9 @@ async def whatsapp_webhook(
 ):
     phone = From.replace("whatsapp:", "")
     try:
-        state = _build_state(phone, Body)
+        state  = _build_state(phone, Body)
         result = graph.invoke(state)
-        reply = result.get("reply") or "Sorry, something went wrong."
+        reply  = result.get("reply") or "Sorry, something went wrong."
 
         customer_id = result.get("customer_id") or get_or_create_customer(phone)
         save_message(customer_id, "customer", Body)
@@ -99,13 +116,11 @@ async def razorpay_webhook(
         print("[Razorpay] ❌ Invalid signature")
         return {"status": "invalid"}
 
-    data = json.loads(body)
+    data  = json.loads(body)
     event = data.get("event")
     print(f"[Razorpay] Event: {event}")
-    print(f"[Razorpay] Full payload keys: {data.get('payload', {}).keys()}")
 
     # ── Only handle payment_link events ───────────────────────────────────────
-    # payment.captured fires alongside payment_link.paid — ignore it
     if event not in ("payment_link.paid", "payment_link.cancelled", "payment.failed"):
         print(f"[Razorpay] Ignoring event: {event}")
         return {"status": "ignored"}
@@ -118,7 +133,7 @@ async def razorpay_webhook(
     )
 
     if not payload:
-        print(f"[Razorpay] ❌ No payment_link entity in payload for event: {event}")
+        print(f"[Razorpay] ❌ No payment_link entity for event: {event}")
         return {"status": "no_payload"}
 
     # ── Normalize phone number ─────────────────────────────────────────────────
@@ -127,7 +142,7 @@ async def razorpay_webhook(
         print("[Razorpay] ❌ No contact found in payload")
         return {"status": "no_contact"}
 
-    formatted_phone = raw_contact if raw_contact.startswith("+") else f"+{raw_contact}"
+    formatted_phone  = raw_contact if raw_contact.startswith("+") else f"+{raw_contact}"
     twilio_recipient = f"whatsapp:{formatted_phone}"
     print(f"[Razorpay] Contact: {formatted_phone}")
 
@@ -135,29 +150,78 @@ async def razorpay_webhook(
     customer_id = get_or_create_customer(formatted_phone)
     print(f"[Razorpay] customer_id: {customer_id}")
 
+    # ── Handle paid ───────────────────────────────────────────────────────────
     if event == "payment_link.paid":
-        amount = payload.get("amount", 0) / 100
+        amount   = payload.get("amount", 0) / 100
         order_id = payload.get("notes", {}).get("order_id", "N/A") if payload.get("notes") else "N/A"
 
         # 1. Mark session completed
         mark_session_completed(customer_id)
         print(f"[Razorpay] ✅ Session marked completed")
 
-        # 2. Build reply
+        # 2. Update payment_status in orders table
+        cur.execute("""
+            UPDATE orders
+            SET payment_status = 'paid'
+            WHERE customer_id = %s
+            AND created_at = (
+                SELECT MAX(created_at) FROM orders WHERE customer_id = %s
+            )
+        """, (customer_id, customer_id))
+        conn.commit()
+
+        # 3. Calculate and save ETA
+        cur.execute("""
+            SELECT order_details, customer_address FROM orders
+            WHERE customer_id = %s
+            ORDER BY created_at DESC LIMIT 1
+        """, (customer_id,))
+        row = cur.fetchone()
+
+        eta_line = ""
+        if row:
+            order_details, customer_address = row
+            items   = json.loads(order_details) if isinstance(order_details, str) else order_details
+            address = customer_address or ""
+
+            if address:
+                eta_result = calculate_full_eta(items, address)
+                total_eta  = eta_result["total"]
+                breakdown  = eta_result["breakdown"]
+                save_eta(customer_id, total_eta, address)
+
+                queue_line = (
+                    f"👨‍🍳 Kitchen queue: {breakdown['queue_delay']} mins\n"
+                    if breakdown["queue_delay"] > 0 else ""
+                )
+                eta_line = (
+                    f"\n\n🕐 *Estimated Delivery: {total_eta} minutes*\n"
+                    f"📦 Prep time: {breakdown['prep_time']} mins\n"
+                    f"{queue_line}"
+                    f"🚗 Travel time: {breakdown['travel_time']} mins\n"
+                    f"📍 Delivering to: {address}"
+                )
+            else:
+                # No address stored — give a basic ETA from prep + queue only
+                eta_result = calculate_full_eta(items, None)
+                total_eta  = eta_result["total"]
+                save_eta(customer_id, total_eta)
+                eta_line = f"\n\n🕐 *Estimated Delivery: ~{total_eta} minutes*"
+
+        # 4. Build and send reply
         reply = (
             f"✅ *Payment Received!*\n\n"
             f"Thank you! We've received your payment of ₹{amount:.2f}. "
             f"Your order is now being prepared. 🍳\n\n"
             f"Order ID: {order_id}"
+            f"{eta_line}"
         )
 
-        # 3. Save to history
         save_message(customer_id, "bot", reply)
-
-        # 4. Send WhatsApp
         send_whatsapp(twilio_recipient, reply)
-        print(f"[Razorpay] ✅ Message sent to {twilio_recipient}")
+        print(f"[Razorpay] ✅ ETA message sent to {twilio_recipient}")
 
+    # ── Handle failed / cancelled ─────────────────────────────────────────────
     elif event in ("payment_link.cancelled", "payment.failed"):
         reply = (
             "⚠️ Your payment was not successful.\n\n"
@@ -168,6 +232,8 @@ async def razorpay_webhook(
         print(f"[Razorpay] ⚠️ Failure message sent")
 
     return {"status": "ok"}
+
+
 # ── CLI (for local testing) ────────────────────────────────────────────────────
 
 def run_cli():
@@ -180,9 +246,9 @@ def run_cli():
             break
 
         try:
-            state = _build_state(phone, message)
+            state  = _build_state(phone, message)
             result = graph.invoke(state)
-            reply = result.get("reply") or "Sorry, something went wrong."
+            reply  = result.get("reply") or "Sorry, something went wrong."
 
             customer_id = result.get("customer_id") or get_or_create_customer(phone)
             save_message(customer_id, "customer", message)

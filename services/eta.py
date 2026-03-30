@@ -27,6 +27,7 @@ def _geocode_address(address: str):
             timeout=5,
         )
         results = response.json()
+        print(f"[Nominatim] Raw results: {results}")
         if not results:
             print(f"[Nominatim] No results for address: '{address}'")
             return None
