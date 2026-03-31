@@ -187,3 +187,19 @@ def get_saved_address(customer_id):
     """, (customer_id,))
     row = cur.fetchone()
     return row[0] if row else None
+
+def get_sticky_route(customer_id: int):
+    cur.execute("""
+        SELECT sticky_route FROM customers
+        WHERE customer_id = %s
+    """, (customer_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+def save_sticky_route(customer_id: int, route):
+    cur.execute("""
+        UPDATE customers
+        SET sticky_route = %s, sticky_updated_at = NOW()
+        WHERE customer_id = %s
+    """, (route, customer_id))
+    conn.commit()

@@ -27,9 +27,9 @@ def run_agent_loop(prompt: str, tools: list, execute_fn) -> tuple[str, str]:
     contents = [{"role": "user", "parts": [{"text": prompt}]}]
 
     final_reply = ""
-    stage = "ordering"
+    stage       = "ordering"
     max_iterations = 10
-    iteration = 0
+    iteration      = 0
 
     while iteration < max_iterations:
         iteration += 1
@@ -43,21 +43,21 @@ def run_agent_loop(prompt: str, tools: list, execute_fn) -> tuple[str, str]:
 
         part = response.candidates[0].content.parts[0]
 
+        # ── Plain text — model is done, send to user ───────────────────────────
         if not part.function_call:
             final_reply = part.text or final_reply
             break
 
         tool_name = part.function_call.name
-        args = _parse_function_args(part.function_call)
+        args      = _parse_function_args(part.function_call)
 
         print(f"[iteration {iteration}] TOOL: {tool_name} ARGS: {args}")
 
         result = execute_fn(tool_name, args)
-        stage = result.get("stage", stage)
+        stage  = result.get("stage", stage)
 
         print(f"[iteration {iteration}] RESULT: {result}")
 
-        # Always append model tool call + result to contents
         contents.append({
             "role": "model",
             "parts": [{"function_call": {"name": tool_name, "args": args}}]
@@ -67,7 +67,13 @@ def run_agent_loop(prompt: str, tools: list, execute_fn) -> tuple[str, str]:
             "parts": [{"function_response": {"name": tool_name, "response": result}}]
         })
 
-        # If tool demands a follow-up, inject it and keep looping
+        # ── Escalate → break immediately, supervisor handles it ────────────────
+        if tool_name == "escalate":
+            print(f"[iteration {iteration}] Escalate called → handing to supervisor")
+            final_reply = ""
+            break
+
+        # ── Follow-up action required ──────────────────────────────────────────
         if "next_action" in result:
             contents.append({
                 "role": "user",

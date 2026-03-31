@@ -7,6 +7,13 @@ from fastapi import FastAPI, Request, Form, Header
 from config import TWILIO_WHATSAPP_NUMBER, RAZORPAY_WEBHOOK_SECRET, client
 from graph import build_graph
 
+
+from services.eta import calculate_full_eta
+from services.wa import send_whatsapp
+
+app = FastAPI()
+graph = build_graph()
+
 from services.db import (
     get_or_create_customer,
     get_history,
@@ -15,14 +22,10 @@ from services.db import (
     mark_session_completed,
     save_message,
     save_eta,
+    get_sticky_route,    # ✅ add this
     cur,
     conn,
 )
-from services.eta import calculate_full_eta
-from services.wa import send_whatsapp
-
-app = FastAPI()
-graph = build_graph()
 
 def _build_state(phone: str, message: str) -> dict:
     customer_id   = get_or_create_customer(phone)
@@ -40,8 +43,9 @@ def _build_state(phone: str, message: str) -> dict:
     row              = cur.fetchone()
     delivery_address = row[0] if row and row[0] else ""
 
-    # ── Sticky route — stay on order if session is active ─────────────────────
-    sticky = "order" if session else None
+    # ── Sticky route from DB ───────────────────────────────────────────────────
+    sticky = get_sticky_route(customer_id)
+    print(f"[State] sticky_route from DB: {sticky}")
 
     return {
         "customer_id":      customer_id,
@@ -50,7 +54,7 @@ def _build_state(phone: str, message: str) -> dict:
         "history":          history,
         "menu":             menu,
         "current_order":    current_order,
-        "delivery_address": delivery_address,   # ✅ restored from DB
+        "delivery_address": delivery_address,
         "intent":           "",
         "action":           "",
         "items":            [],
@@ -61,12 +65,13 @@ def _build_state(phone: str, message: str) -> dict:
         "payment_link_id":  None,
         "stage":            "ordering",
         "route":            "",
-        "sticky_route":     sticky,             # ✅ sticky if session active
+        "sticky_route":     sticky,
         "resolved":         False,
         "stuck":            False,
         "stuck_reason":     "",
         "faq_confidence":   None,
         "faq_searches":     None,
+        "escalated":        False,
     }
 
 

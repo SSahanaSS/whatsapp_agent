@@ -8,7 +8,7 @@ class AgentState(TypedDict):
     history:          str
     menu:             List[Dict[str, Any]]
     current_order:    List[Dict[str, Any]]
-    delivery_address: str                  # ✅ add this
+    delivery_address: str
     intent:           str
     action:           str
     items:            List[Dict[str, Any]]
@@ -25,3 +25,4 @@ class AgentState(TypedDict):
     stuck_reason:     str
     faq_confidence:   Optional[float]
     faq_searches:     Optional[int]
+    escalated:        Optional[bool]   # ✅ only new field needed

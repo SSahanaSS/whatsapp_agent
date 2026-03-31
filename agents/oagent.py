@@ -6,6 +6,7 @@ from services.db import (
     merge_cart,
     finalize_order,
     get_saved_address,
+    save_sticky_route,
     cur,
     conn,
 )
@@ -130,6 +131,35 @@ ORDER_TOOLS = [
             "required": ["message"],
         },
     },
+    {
+        "name": "escalate",
+        "description": (
+              "Use this ONLY when the current message is clearly NOT about placing or modifying a food order. "
+        "Do NOT escalate for menu browsing, food availability questions, "
+        "or 'what do you have' type queries. These are part of ordering.\n\n"
+        "Escalate immediately for these mid-conversation topic shifts:\n"
+        "- FAQ or business-info questions: ingredients, spice level, veg/non-veg, timings, delivery areas, policies\n"
+        "- Payment method questions: UPI, GPay, PhonePe, cash, card, accepted payment options\n"
+        "- Existing-order support: where is my order, delivery delay, wrong item, missing item, refund, payment failed\n"
+        "- Complaints or support requests unrelated to building the current cart\n\n"
+        "Examples that MUST escalate:\n"
+        "- 'Is it spicy?'\n"
+        "- 'Do you accept UPI?'\n"
+        "- 'Can I pay by GPay?'\n"
+        "- 'Where is my order?'\n"
+        "- 'Refund venum'\n\n"
+        "Examples that must NOT escalate:\n"
+        "- 'Show menu'\n"
+        "- 'Add 2 idli'\n"
+        "- 'Remove dosa'\n"
+        "- 'Confirm order'"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
@@ -138,8 +168,6 @@ def _make_execute_fn(state: dict):
     sender      = state["sender"]
     menu_items  = [item["item_name"].lower() for item in state.get("menu", [])]
 
-    # ── Restore delivery_address from DB at start of every turn ───────────────
-    # State is rebuilt fresh each WhatsApp message, so we reload from DB
     if not state.get("delivery_address"):
         saved = get_saved_address(customer_id)
         if saved:
@@ -149,14 +177,25 @@ def _make_execute_fn(state: dict):
     def execute_fn(tool_name: str, args: dict) -> dict:
         args = args or {}
 
-        # ── REPLY ONLY ─────────────────────────────────────────────────────────
         if tool_name == "reply_only":
             msg = args.get("message", "")
-            state["reply"] = msg
+            state["reply"]  = msg
             state["action"] = "NONE"
             return {"reply": msg}
 
-        # ── GET LAST ORDER ─────────────────────────────────────────────────────
+        if tool_name == "escalate":
+            print(f"[order_agent] Escalating to supervisor")
+            state["sticky_route"] = None
+            save_sticky_route(customer_id, None) 
+            state["escalated"]    = True
+            state["reply"]        = ""
+            cur.execute("""
+                DELETE FROM order_sessions
+                WHERE customer_id = %s AND status = 'active' AND items = '[]'
+            """, (customer_id,))
+            conn.commit()
+            return {"status": "escalated"}
+
         if tool_name == "get_last_order":
             cur.execute("""
                 SELECT order_details FROM orders
@@ -169,7 +208,6 @@ def _make_execute_fn(state: dict):
             items = json.loads(row[0]) if isinstance(row[0], str) else row[0]
             return {"last_order": items}
 
-        # ── ADD ITEMS ──────────────────────────────────────────────────────────
         if tool_name == "add_items":
             items = args.get("items", [])
             if isinstance(items, dict):
@@ -195,7 +233,6 @@ def _make_execute_fn(state: dict):
             cart_str = ", ".join(f"{i['qty']}× {i['item_name']}" for i in updated_cart)
             return {"cart": updated_cart, "cart_summary": cart_str}
 
-        # ── REMOVE / UPDATE ────────────────────────────────────────────────────
         if tool_name in ["remove_items", "update_items"]:
             items = args.get("items", [])
             if isinstance(items, dict):
@@ -212,15 +249,11 @@ def _make_execute_fn(state: dict):
             cart_str = ", ".join(f"{i['qty']}× {i['item_name']}" for i in updated_cart) or "empty"
             return {"cart": updated_cart, "cart_summary": cart_str}
 
-        # ── COLLECT ADDRESS ────────────────────────────────────────────────────
         if tool_name == "collect_address":
             address = args.get("address", "").strip()
 
             if address:
-                # Save to state
                 state["delivery_address"] = address
-
-                # ✅ Persist to DB so it survives across fresh state rebuilds
                 cur.execute("""
                     UPDATE orders
                     SET customer_address = %s
@@ -231,26 +264,20 @@ def _make_execute_fn(state: dict):
                 """, (address, customer_id, customer_id))
                 conn.commit()
                 print(f"[order_agent] Address saved to DB: {address}")
-
-                # ✅ next_action forces the agent to call confirm_order immediately
-                # without waiting for another customer message
                 return {
                     "status":      "confirmed",
                     "address":     address,
                     "next_action": "Address confirmed. Call confirm_order now to finalize the order.",
                 }
 
-            # No address provided — check DB for a saved one
             saved = get_saved_address(customer_id)
             if saved:
                 return {
                     "status":        "awaiting_confirmation",
                     "saved_address": saved,
                 }
-
             return {"status": "awaiting_input"}
 
-        # ── CONFIRM ORDER ──────────────────────────────────────────────────────
         if tool_name == "confirm_order":
             delivery_address = state.get("delivery_address", "").strip()
             print(f"[confirm_order] address='{delivery_address}'")
@@ -258,7 +285,7 @@ def _make_execute_fn(state: dict):
             if not delivery_address:
                 return {
                     "error": "Cannot confirm order — no delivery address collected yet.",
-                    "hint": "Call collect_address to get or confirm the customer's address first.",
+                    "hint":  "Call collect_address to get or confirm the customer's address first.",
                 }
 
             session = get_active_session(customer_id)
@@ -290,11 +317,12 @@ def _make_execute_fn(state: dict):
                     "customer":    {"contact": sender.replace("whatsapp:", "")},
                     "notify":      {"sms": False, "email": False},
                 })
-                payment_url = payment_link["short_url"]
+                payment_url              = payment_link["short_url"]
                 state["payment_link_id"] = payment_link["id"]
                 state["stage"]           = "payment"
+                state["sticky_route"]    = None
+                save_sticky_route(customer_id, None) 
                 print(f"[confirm_order] ✅ Payment link: {payment_url}")
-                state["sticky_route"] = None # Clear sticky route after payment link is generated
 
                 return {
                     "status":        "success",
@@ -316,6 +344,17 @@ def _make_execute_fn(state: dict):
 
 
 def order_agent(state: dict) -> dict:
+    if not state.get("escalated"):
+        state["sticky_route"] = "order"
+        save_sticky_route(state["customer_id"], "order")  # persist immediately
+
+    state["escalated"] = False
+    
+
+    session = get_active_session(state["customer_id"])
+    if not session:
+        save_session(state["customer_id"], [])
+
     menu          = state.get("menu", [])
     current_order = state.get("current_order", [])
     message       = state.get("message", "")
@@ -324,24 +363,40 @@ def order_agent(state: dict) -> dict:
     saved_address = get_saved_address(customer_id)
 
     prompt = f"""
-You are a helpful and friendly ordering assistant for a home kitchen.
+You are an ordering assistant. Your only job is to help customers
+place orders, manage their cart, and complete payment.
+
 Always reply in the same language as the customer.
 
-Your goal:
-- Help the customer place an order smoothly
-- Manage their cart using available tools
-- Guide them through checkout and payment
+IMPORTANT BOUNDARY:
+You handle only order-building actions for the current cart:
+- showing menu for purchase
+- adding, removing, or updating items
+- collecting delivery address
+- confirming the order and generating the payment link
 
-General Guidelines:
-- Use tools to perform actions like adding, updating, or removing items
-- If the user mentions food items, update the cart accordingly
-- If quantity is not specified, assume 1
-- If the user seems finished (e.g., "done", "that's all"), proceed towards order confirmation
-- Before confirming an order, ensure a delivery address is available
-- If address is missing, use the address collection tool
-- For normal conversation (greetings, questions), reply naturally without using tools
+If the user changes topic in the middle of ordering, do NOT answer it here.
+Call escalate immediately for:
+- food detail questions: ingredients, spice level, veg/non-veg, what's in a dish
+- business questions: opening time, delivery areas, policies
+- payment method questions: UPI, GPay, PhonePe, cash, card, accepted payment methods
+- existing-order support: where is my order, order status, delay, wrong item, missing item, refund, payment failed
+- complaints about a previous or current order
 
-Be helpful, concise, and clear in responses.
+Do NOT escalate these:
+- menu browsing for purchase
+- adding/removing/updating cart items
+- address confirmation
+- confirming the order
+
+Examples:
+- "2 idli" -> add_items
+- "Show menu" -> reply_only
+- "Is it spicy?" -> escalate
+- "Do you accept UPI?" -> escalate
+- "Can I pay via PhonePe?" -> escalate
+- "Where is my order?" -> escalate
+- "Refund venum" -> escalate
 
 --- MENU ---
 {json.dumps(menu, ensure_ascii=False)}
@@ -362,7 +417,7 @@ Be helpful, concise, and clear in responses.
     try:
         execute_fn         = _make_execute_fn(state)
         final_reply, stage = run_agent_loop(prompt, ORDER_TOOLS, execute_fn)
-        state["reply"]     = final_reply or state.get("reply", "Sorry, something went wrong.")
+        state["reply"]     = final_reply or state.get("reply", "")
         state["stage"]     = stage
         return state
 
@@ -370,6 +425,6 @@ Be helpful, concise, and clear in responses.
         print("Order Agent Error:", e)
         import traceback
         traceback.print_exc()
-        state["reply"] = "Sorry, something went wrong. Please try again."
+        state["reply"]  = "Sorry, something went wrong. Please try again."
         state["action"] = "NONE"
         return state
