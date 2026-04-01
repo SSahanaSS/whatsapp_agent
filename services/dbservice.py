@@ -1,12 +1,6 @@
 import psycopg2
 
-conn = psycopg2.connect(
-    dbname="business_proj",
-    user="postgres",
-    password="Soup#2004",
-    host="localhost",
-    port="5432"
-)
+from config import conn
 
 
 def get_cursor():

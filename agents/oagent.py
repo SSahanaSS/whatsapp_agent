@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+import pytz
 from services.gemini import run_agent_loop
 from services.db import (
     get_active_session,
@@ -14,9 +16,58 @@ import razorpay
 from config import RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET
 
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+IST = pytz.timezone("Asia/Kolkata")
+
+
+def _format_menu_for_reply(menu: list[dict]) -> str:
+    now_label = datetime.now(IST).strftime("%I:%M %p IST")
+
+    if not menu:
+        return (
+            f"Menu for {now_label}\n\n"
+            "No items are available right now.\n"
+            "Please try again during breakfast, lunch, or drinks hours."
+        )
+
+    headers = ["ID", "Item", "Price", "From", "Until"]
+    rows = [
+        [
+            str(item.get("item_id", "")),
+            str(item.get("item_name", "")),
+            f"{float(item.get('price', 0)):.2f}",
+            str(item.get("available_from", "")),
+            str(item.get("available_until", "")),
+        ]
+        for item in menu
+    ]
+    widths = [
+        max(len(headers[idx]), max(len(row[idx]) for row in rows))
+        for idx in range(len(headers))
+    ]
+
+    def fmt_row(row: list[str]) -> str:
+        return " | ".join(value.ljust(widths[idx]) for idx, value in enumerate(row))
+
+    divider = "-+-".join("-" * width for width in widths)
+    lines = [fmt_row(headers), divider]
+    lines.extend(fmt_row(row) for row in rows)
+
+    return f"Menu available right now ({now_label})\n\n" + "\n".join(lines)
 
 
 ORDER_TOOLS = [
+    {
+        "name": "show_menu",
+        "description": (
+            "Show the currently available menu items with item ID, price, and time window. "
+            "Use this when the customer asks to see the menu or asks what is available now."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
     {
         "name": "get_last_order",
         "description": "Fetches the customer's last completed order from the database.",
@@ -180,6 +231,12 @@ def _make_execute_fn(state: dict):
         if tool_name == "reply_only":
             msg = args.get("message", "")
             state["reply"]  = msg
+            state["action"] = "NONE"
+            return {"reply": msg}
+
+        if tool_name == "show_menu":
+            msg = _format_menu_for_reply(state.get("menu", []))
+            state["reply"] = msg
             state["action"] = "NONE"
             return {"reply": msg}
 
@@ -391,7 +448,8 @@ Do NOT escalate these:
 
 Examples:
 - "2 idli" -> add_items
-- "Show menu" -> reply_only
+- "Show menu" -> show_menu
+- "What is available now?" -> show_menu
 - "Is it spicy?" -> escalate
 - "Do you accept UPI?" -> escalate
 - "Can I pay via PhonePe?" -> escalate

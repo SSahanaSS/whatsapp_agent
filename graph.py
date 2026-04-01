@@ -4,6 +4,20 @@ from agents.supervisor import supervisor_agent
 from agents.oagent import order_agent
 from agents.complaint import complaint_agent
 from agents.faq import faq_agent
+from services.db import save_sticky_route
+
+
+def clarification_node(state: dict) -> dict:
+    state["sticky_route"] = None
+    customer_id = state.get("customer_id")
+    if customer_id:
+        save_sticky_route(customer_id, None)
+    state["stuck"] = False
+    state["reply"] = (
+        "I can help with placing an order, order support, or menu and business questions. "
+        "Please rephrase your message a little."
+    )
+    return state
 
 
 def _entry_router(state: dict) -> str:
@@ -15,9 +29,12 @@ def _entry_router(state: dict) -> str:
     return "supervisor"
 
 
-def _order_exit(state: dict) -> str:
+def _agent_exit(state: dict) -> str:
+    if state.get("stuck"):
+        print("[agent_exit] Stuck → clarification")
+        return "clarification"
     if state.get("escalated"):
-        print("[order_exit] Escalated → supervisor")
+        print("[agent_exit] Escalated → supervisor")
         return "supervisor"
     return "end"
 
@@ -25,18 +42,13 @@ def _order_exit(state: dict) -> str:
 def _route(state: dict) -> str:
     route = state.get("route", "unknown")
     print(f"[Router] Received route: {route}")
+    if route == "greeting":
+        print("[Router] Greeting route → END")
+        return "end"
     if route not in ("order", "complaint", "faq"):
-        print("[Router] Invalid or terminal route → END")
-        return "end"
+        print("[Router] Invalid or unclear route → clarification")
+        return "clarification"
     return route
-
-def _complaint_exit(state: dict) -> str:
-    if state.get("sticky_route") is None:
-        print("[complaint_exit] Resolved → END")
-        return "end"
-    return "end"  # always ends for now, sticky handled by _entry_router next turn
-
- # stays the same, sticky via _entry_router
 
 
 def build_graph():
@@ -46,6 +58,7 @@ def build_graph():
     workflow.add_node("order", order_agent)
     workflow.add_node("complaint", complaint_agent)
     workflow.add_node("faq", faq_agent)
+    workflow.add_node("clarification", clarification_node)
 
     workflow.set_conditional_entry_point(
         _entry_router,
@@ -64,22 +77,41 @@ def build_graph():
             "order":     "order",
             "complaint": "complaint",
             "faq":       "faq",
-            "end":       END,
+            "clarification": "clarification",
+            "end": END,
         },
     )
 
-    # ✅ order uses conditional exit — escalate goes back to supervisor
     workflow.add_conditional_edges(
         "order",
-        _order_exit,
+        _agent_exit,
         {
             "supervisor": "supervisor",
+            "clarification": "clarification",
             "end":        END,
         }
     )
 
-    # complaint and faq always end
-    workflow.add_edge("complaint", END)
-    workflow.add_edge("faq", END)
+    workflow.add_conditional_edges(
+        "complaint",
+        _agent_exit,
+        {
+            "supervisor": "supervisor",
+            "clarification": "clarification",
+            "end": END,
+        }
+    )
+
+    workflow.add_conditional_edges(
+        "faq",
+        _agent_exit,
+        {
+            "supervisor": "supervisor",
+            "clarification": "clarification",
+            "end": END,
+        }
+    )
+
+    workflow.add_edge("clarification", END)
 
     return workflow.compile()

@@ -206,6 +206,7 @@ def _finalize(state: dict, best_result: dict, best_confidence: float, search_cou
 
 def faq_agent(state: dict) -> dict:
     print("\n  [FAQ Agent] Starting enhanced RAG pipeline...")
+    state["escalated"] = False
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -273,11 +274,11 @@ def faq_agent(state: dict) -> dict:
             except json.JSONDecodeError:
                 tool_args = {}
 
+            search_count += 1
             tool_result     = execute_faq_tool(tool_name, tool_args)
             tool_result_str = tool_result
 
             if tool_name == "search_faq":
-                search_count += 1
                 try:
                     parsed     = json.loads(tool_result)
                     confidence = parsed.get("top_confidence", 0.0)
@@ -315,6 +316,32 @@ def faq_agent(state: dict) -> dict:
                         f"\n[REFLECTION] Confidence {confidence} is below {CONFIDENCE_THRESHOLD}. "
                         f"Try a simpler or rephrased query."
                     )
+                except Exception:
+                    pass
+            elif tool_name == "search_menu_info":
+                try:
+                    parsed = json.loads(tool_result)
+                    if parsed.get("found"):
+                        best_result = parsed
+                        best_confidence = max(best_confidence, 1.0)
+                        messages.append({
+                            "role": "assistant",
+                            "content": message.content or "",
+                            "tool_calls": [{
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call.function.name,
+                                    "arguments": tool_call.function.arguments,
+                                }
+                            }]
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_result_str,
+                        })
+                        return _finalize(state, best_result, best_confidence, search_count)
                 except Exception:
                     pass
 

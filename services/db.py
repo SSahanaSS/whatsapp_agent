@@ -1,5 +1,13 @@
 import json
 from config import cur, conn
+from datetime import datetime
+import pytz
+
+IST = pytz.timezone("Asia/Kolkata")
+
+
+def _current_ist_time():
+    return datetime.now(IST).time().replace(microsecond=0)
 
 
 def get_or_create_customer(phone):
@@ -34,10 +42,29 @@ def save_message(customer_id, sender, text):
     conn.commit()
 
 
+
+
 def get_menu():
-    cur.execute("SELECT item_name, price FROM menu WHERE availability=TRUE")
+    current_time = _current_ist_time()
+    cur.execute("""
+        SELECT item_id, item_name, price, availability, available_from, available_until
+        FROM menu
+        WHERE availability = TRUE
+        AND %s::time BETWEEN available_from AND available_until
+        ORDER BY available_from, item_id
+    """, (current_time,))
     rows = cur.fetchall()
-    return [{"item_name": r[0], "price": float(r[1])} for r in rows]
+    return [
+        {
+            "item_id": r[0],
+            "item_name": r[1],
+            "price": float(r[2]),
+            "availability": bool(r[3]),
+            "available_from": str(r[4]),
+            "available_until": str(r[5]),
+        }
+        for r in rows
+    ]
 
 
 def get_active_session(customer_id):

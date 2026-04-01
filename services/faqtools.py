@@ -10,9 +10,13 @@ Fixes:
 
 import re
 import psycopg2
+from datetime import datetime
+import pytz
 from google import genai
 from google.genai import types
 from config import NEON_CONNECTION_STRING, GEMINI_API_KEY
+
+IST = pytz.timezone("Asia/Kolkata")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Gemini Client
@@ -253,12 +257,14 @@ def search_faq(query: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 def search_menu_info(query: str) -> dict:
     print(f"      [FAQ Tools] Menu search for: '{query}'")
+    now_ist = datetime.now(IST).time().replace(microsecond=0)
 
     rows = safe_db_execute("""
-        SELECT item_name, price, availability
+        SELECT item_id, item_name, price, availability, available_from, available_until
         FROM menu
         WHERE LOWER(item_name) LIKE LOWER(%s)
         AND availability = TRUE
+        ORDER BY available_from, item_id
     """, (f"%{query}%",))
 
     if not rows:
@@ -272,9 +278,13 @@ def search_menu_info(query: str) -> dict:
         "found": True,
         "items": [
             {
-                "item_name": r[0],
-                "price": float(r[1]),
-                "available": r[2]
+                "item_id": r[0],
+                "item_name": r[1],
+                "price": float(r[2]),
+                "available": r[3],
+                "available_from": str(r[4]),
+                "available_until": str(r[5]),
+                "currently_available": bool(r[4] <= now_ist <= r[5]),
             }
             for r in rows
         ]
