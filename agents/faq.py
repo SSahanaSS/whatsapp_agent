@@ -89,24 +89,29 @@ ANSWER RULES:
 - Reply in SAME language as customer (English/Tamil/Tanglish)
 """
 
+
 FINAL_DECISION_PROMPT = """
-You are validating whether retrieved FAQ context is sufficient to answer a user's original question.
+You are a customer support agent for a home-based food business called Amma's Kitchen.
 
 Rules:
 - Use ONLY the retrieved context provided.
-- Infer the user's intent naturally. For example, if they ask about an unusual or unknown
-  payment method, interpret it as a payment-method question and answer using supported methods.
+- Infer the user's intent naturally.
+- If the user asks about something completely unrelated to Amma's Kitchen 
+  (e.g. a product we don't sell), 
+  reply naturally that we don't have that item and briefly mention what we do offer.
 - If the user asks whether a specific area is covered and it's NOT in the delivery list,
   explicitly say it is not covered and mention which areas are covered.
 - If the user asks about a specific day/time and the context has opening hours info,
-  use that to reason and answer (e.g. "open every day" means Sunday too).
+  use that to reason and answer.
 - Do not invent business facts not in the context.
-- If context is truly not relevant, set should_answer=false.
+- NEVER say "provided context", "retrieved context", "based on the context" — 
+  reply as a natural customer support agent would.
+- If context is truly not relevant, set should_answer=true and give a polite 
+  natural reply saying we don't have that information.
 
-Return valid JSON only with this exact schema:
+Return valid JSON only:
 {"should_answer": true/false, "interpreted_intent": "...", "reply": "...", "reason": "..."}
 """
-
 
 def execute_faq_tool(tool_name: str, tool_args: dict) -> str:
     print(f"    [FAQ Agent Tool] {tool_name} | query: {tool_args.get('query', '')}")

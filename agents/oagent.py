@@ -24,35 +24,15 @@ def _format_menu_for_reply(menu: list[dict]) -> str:
 
     if not menu:
         return (
-            f"Menu for {now_label}\n\n"
-            "No items are available right now.\n"
+            f"No items available right now ({now_label}).\n"
             "Please try again during breakfast, lunch, or drinks hours."
         )
 
-    headers = ["ID", "Item", "Price", "From", "Until"]
-    rows = [
-        [
-            str(item.get("item_id", "")),
-            str(item.get("item_name", "")),
-            f"{float(item.get('price', 0)):.2f}",
-            str(item.get("available_from", "")),
-            str(item.get("available_until", "")),
-        ]
-        for item in menu
-    ]
-    widths = [
-        max(len(headers[idx]), max(len(row[idx]) for row in rows))
-        for idx in range(len(headers))
-    ]
+    lines = [f"*Menu right now* ({now_label})\n"]
+    for item in menu:
+        lines.append(f"• {item['item_name']} — Rs{float(item['price']):.0f}")
 
-    def fmt_row(row: list[str]) -> str:
-        return " | ".join(value.ljust(widths[idx]) for idx, value in enumerate(row))
-
-    divider = "-+-".join("-" * width for width in widths)
-    lines = [fmt_row(headers), divider]
-    lines.extend(fmt_row(row) for row in rows)
-
-    return f"Menu available right now ({now_label})\n\n" + "\n".join(lines)
+    return "\n".join(lines)
 
 
 ORDER_TOOLS = [
@@ -270,9 +250,25 @@ def _make_execute_fn(state: dict):
             if isinstance(items, dict):
                 items = [items]
 
+            # ── Resolve item_id → item_name if model sent item_id instead ─────────
+            menu = state.get("menu", [])
+            for i in items:
+                if "item_name" not in i and "item_id" in i:
+                    match = next(
+                        (m for m in menu if m["item_id"] == int(i["item_id"])),
+                        None
+                    )
+                    if match:
+                        i["item_name"] = match["item_name"]
+                    else:
+                        return {"error": f"Item ID {i['item_id']} not found in menu."}
+                # normalize qty field (model sometimes sends 'quantity' instead of 'qty')
+                if "quantity" in i and "qty" not in i:
+                    i["qty"] = int(i["quantity"])
+
             invalid = [
                 i["item_name"] for i in items
-                if i["item_name"].lower() not in menu_items
+                if i.get("item_name", "").lower() not in menu_items
             ]
             if invalid:
                 return {"error": f"Items not on menu: {', '.join(invalid)}."}
