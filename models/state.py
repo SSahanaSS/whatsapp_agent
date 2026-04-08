@@ -9,6 +9,8 @@ class AgentState(TypedDict):
     menu:             List[Dict[str, Any]]
     current_order:    List[Dict[str, Any]]
     delivery_address: str
+    customer_lat: Optional[float]
+    customer_lng: Optional[float]
     intent:           str
     action:           str
     items:            List[Dict[str, Any]]

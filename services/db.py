@@ -9,6 +9,13 @@ IST = pytz.timezone("Asia/Kolkata")
 def _current_ist_time():
     return datetime.now(IST).time().replace(microsecond=0)
 
+def get_saved_name(customer_id: str) -> str | None:
+    cur.execute("""
+        SELECT name FROM customers
+        WHERE customer_id = %s
+    """, (customer_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
 
 def get_or_create_customer(phone):
     clean_phone = phone.replace("whatsapp:", "").lstrip("+")
@@ -28,9 +35,11 @@ def get_history(customer_id):
     cur.execute("""
         SELECT sender, message_text FROM messages
         WHERE customer_id=%s
-        ORDER BY created_at ASC
+        ORDER BY created_at DESC
+        LIMIT 10
     """, (customer_id,))
     rows = cur.fetchall()
+    rows.reverse()  # back to chronological order
     return "\n".join([f"{r[0]}: {r[1]}" for r in rows])
 
 

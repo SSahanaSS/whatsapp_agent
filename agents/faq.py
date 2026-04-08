@@ -10,15 +10,22 @@ Flow:
 - After each search: if confidence < 0.65 and searches < 3 → retry
 - After 3 searches OR good confidence → LLM finalizes from best context
 - LLM is the final judge — not the threshold
+
+RAGAS logging added to _finalize() — appends one record per FAQ turn
+to ragas_log.jsonl for offline evaluation.
 """
 
 import json
 import os
+import time
 from groq import Groq
 from services.faqtools import search_faq, search_menu_info
 
 from config import groq_client
 CONFIDENCE_THRESHOLD = 0.65
+
+# ── RAGAS log file path ────────────────────────────────────────────────────────
+RAGAS_LOG_PATH = os.environ.get("RAGAS_LOG_PATH", "ragas_log.jsonl")
 
 FAQ_TOOLS = [
     {
@@ -166,22 +173,106 @@ def _llm_finalize_faq_answer(original_query: str, best_result: dict) -> dict:
         }
 
 
+# ── RAGAS logging ──────────────────────────────────────────────────────────────
+
+def _extract_contexts(best_result: dict) -> list[str]:
+    """
+    Pull the retrieved text chunks out of the best_result dict so RAGAS
+    has a list-of-strings for its context fields.
+
+    Handles two common shapes:
+      • search_faq  → {"results": [{"text": "...", ...}, ...]}
+      • search_menu_info → {"item": {"description": "...", ...}}
+    Falls back to dumping the whole dict as a single string.
+    """
+    contexts: list[str] = []
+
+    if not best_result:
+        return contexts
+
+    # FAQ results list
+    results = best_result.get("results", [])
+    if results and isinstance(results, list):
+        for r in results:
+            chunk = r.get("text") or r.get("content") or r.get("answer") or ""
+            if chunk:
+                contexts.append(str(chunk))
+        if contexts:
+            return contexts
+
+    # Menu item shape
+    item = best_result.get("item")
+    if item and isinstance(item, dict):
+        desc = item.get("description") or item.get("name") or ""
+        if desc:
+            contexts.append(str(desc))
+        return contexts
+
+    # Last resort — dump everything
+    contexts.append(json.dumps(best_result))
+    return contexts
+
+
+def _log_to_ragas(
+    question: str,
+    answer: str,
+    best_result: dict,
+    confidence: float,
+    search_count: int,
+    ground_truth: str = "",          # optional — populate if you have golden answers
+) -> None:
+    """
+    Append one JSONL record to ragas_log.jsonl.
+
+    Schema expected by evaluate_ragas.py:
+    {
+        "question":     str,          # user question
+        "answer":       str,          # agent's final reply
+        "contexts":     list[str],    # retrieved chunks
+        "ground_truth": str,          # reference answer (empty = unknown)
+        "confidence":   float,        # top_confidence from retrieval
+        "search_count": int,          # how many searches were done
+        "timestamp":    float         # unix time
+    }
+    """
+    record = {
+        "question":     question,
+        "answer":       answer,
+        "contexts":     _extract_contexts(best_result),
+        "ground_truth": ground_truth,
+        "confidence":   confidence,
+        "search_count": search_count,
+        "timestamp":    time.time(),
+    }
+    try:
+        with open(RAGAS_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        print(f"    [FAQ Agent] RAGAS record logged → {RAGAS_LOG_PATH}")
+    except Exception as e:
+        print(f"    [FAQ Agent] RAGAS log error: {e}")
+
+
+# ── Finalize ───────────────────────────────────────────────────────────────────
+
 def _finalize(state: dict, best_result: dict, best_confidence: float, search_count: int) -> dict:
     """
     Always called at the end.
     Passes best context to LLM to reason and reply.
     Only falls back if truly no context or LLM says not relevant.
+    Logs a RAGAS record after reply is decided.
     """
     original_query = state.get("message", "")
 
     # ── No context at all ──────────────────────────────────────────────────────
     if not best_result:
         print(f"    [FAQ Agent] No context found — fallback")
-        state["reply"]          = _fallback_reply()
+        reply = _fallback_reply()
+        state["reply"]          = reply
         state["stuck"]          = False
         state["stuck_reason"]   = "No FAQ results found"
         state["faq_confidence"] = best_confidence
         state["faq_searches"]   = search_count
+        _log_to_ragas(original_query, reply, {}, best_confidence, search_count)
         return state
 
     # ── LLM reasons over best context ─────────────────────────────────────────
@@ -191,21 +282,26 @@ def _finalize(state: dict, best_result: dict, best_confidence: float, search_cou
     print(f"    [FAQ Agent] Interpreted intent: {decision.get('interpreted_intent', '')}")
 
     if not decision.get("should_answer"):
-        state["reply"]        = _fallback_reply()
+        reply                 = _fallback_reply()
+        state["reply"]        = reply
         state["stuck"]        = False
         state["stuck_reason"] = decision.get("reason", "Context not relevant")
     else:
         reply = decision.get("reply", "").strip()
         if not reply or reply.startswith("CANNOT_ANSWER"):
-            state["reply"]        = _fallback_reply()
+            reply                 = _fallback_reply()
             state["stuck_reason"] = reply
         else:
-            state["reply"]        = reply
             state["stuck_reason"] = ""
+        state["reply"] = reply
         state["stuck"] = False
 
     state["faq_confidence"] = best_confidence
     state["faq_searches"]   = search_count
+
+    # ── Log for RAGAS ─────────────────────────────────────────────────────────
+    _log_to_ragas(original_query, state["reply"], best_result, best_confidence, search_count)
+
     return state
 
 

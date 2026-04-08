@@ -28,7 +28,7 @@ def run_agent_loop(prompt: str, tools: list, execute_fn) -> tuple[str, str]:
 
     final_reply = ""
     stage       = "ordering"
-    max_iterations = 10
+    max_iterations = 5
     iteration      = 0
 
     while iteration < max_iterations:
@@ -39,9 +39,19 @@ def run_agent_loop(prompt: str, tools: list, execute_fn) -> tuple[str, str]:
             tools=gemini_tools,
         )
 
-        print(f"[iteration {iteration}] RAW RESPONSE:", response)
+        # ── Safe debug print — avoid calling str(response) which triggers the bug ──
+        try:
+            candidate = response.candidates[0]
+            parts = candidate.content.parts
+            safe_summary = f"[iteration {iteration}] RAW RESPONSE: candidates={len(response.candidates)}, parts={len(parts)}"
+            print(safe_summary)
+        except Exception as e:
+            print(f"[iteration {iteration}] RAW RESPONSE: (could not summarize — {e})")
+            parts = []
 
-        part = response.candidates[0].content.parts[0]
+        if not parts:
+            break
+        part = parts[0]
 
         # ── Plain text — model is done, send to user ───────────────────────────
         if not part.function_call:

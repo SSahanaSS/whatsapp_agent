@@ -67,8 +67,8 @@ def create_replacement_order(order_id, customer_id):
     """
     cur = get_cursor()
     cur.execute("""
-        INSERT INTO orders (customer_id, order_status, payment_status, replacement_for)
-        SELECT customer_id, 'confirmed', 'paid', order_id
+        INSERT INTO orders (customer_id, order_details, total_amount, order_status, payment_status, replacement_for)
+        SELECT customer_id, order_details, total_amount, 'confirmed', 'paid', order_id
         FROM orders
         WHERE order_id = %s
         RETURNING order_id
