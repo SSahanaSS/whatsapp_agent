@@ -23,7 +23,7 @@ def get_conn():
         host="localhost",
         database="business_proj",
         user="postgres",
-        password="Soup#2004",
+        password="",
         options="-c timezone=Asia/Kolkata",
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
